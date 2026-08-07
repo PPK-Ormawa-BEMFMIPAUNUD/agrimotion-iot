@@ -1,0 +1,24 @@
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment & Secrets
+.env
+.env.*
+
+# IDEs & Editor Files
+.vscode/
+.idea/
+*.swp
+
+# Build outputs & temporary files
+build/
+*.hex
+*.elf
+*.bin
+*.log
