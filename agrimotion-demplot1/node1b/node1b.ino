@@ -35,9 +35,27 @@ const unsigned long MODBUS_WINDOW = 400;         // Waktu tunggu respon sensor R
 // 4. Capacitive Soil Moisture
 #define SOIL_PIN 34   
 
-// --- Sensor Calibration ---
-const int SOIL_DRY = 3500;  // Nilai analog saat ditaruh di udara terbuka
-const int SOIL_WET = 1200;  // Nilai analog saat dicelupkan ke air
+// --- VARIABEL KALIBRASI (OFFSET & MIN-MAX) ---
+const int SOIL_DRY = 3500;      // Nilai analog saat sensor di udara terbuka (baseline kering)
+const int SOIL_WET = 1200;      // Nilai analog saat sensor dicelupkan ke air (baseline basah)
+const float offsetAnalogMoist = 9.0;  // Offset awal demplot 1: sensor di udara terbuka membaca 9, maka hasil dibereskan jadi 0
+const float offsetRS485SoilMoist = 0.0;  // Zeroing/Tare untuk kelembapan tanah RS485
+const float offsetRS485SoilEC = 0.0;      // Zeroing/Tare untuk EC tanah RS485
+const float offsetRS485SoilN = 0.0;       // Zeroing/Tare untuk nitrogen (N)
+const float offsetRS485SoilP = 0.0;       // Zeroing/Tare untuk fosfor (P)
+const float offsetRS485SoilK = 0.0;       // Zeroing/Tare untuk kalium (K)
+const float offsetPH = 0.0;                // pH baru dihitung setelah sensor tertanam, jika belum tertanam tetap 0
+const float offsetLux = 0.0;               // Zeroing/Tare untuk noise cahaya saat ruangan gelap
+const float offsetDHTTemp = 0.0;           // Reference Offset DHT22 agar selaras dengan SHT31 jika tersedia
+const float offsetDHTHum = 0.0;            // Reference Offset DHT22 agar selaras dengan SHT31 jika tersedia
+const float SENSOR_MIN = 0.0;              // Ambang bawah semua hasil kalibrasi
+const float SENSOR_MAX = 100.0;            // Ambang atas untuk persentase kelembapan/cahaya dan nilai umum
+
+float clampSensorFloat(float value, float minValue, float maxValue) {
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
 
 // --- Objects ---
 WiFiClient espClient;
@@ -71,21 +89,45 @@ uint16_t currentP = 0;
 uint16_t currentK = 0; 
 
 void publishData() {
+  // BH1750: zeroing agar noise cahaya gelap tidak memberi nilai lux positif saat ruangan benar-benar gelap.
   if (isBH1750Ready && lightMeter.measurementReady()) {
-    currentLux = lightMeter.readLightLevel();
+    currentLux = lightMeter.readLightLevel() - offsetLux;
+    currentLux = clampSensorFloat(currentLux, SENSOR_MIN, SENSOR_MAX);
   }
 
+  // DHT22: gunakan offset referensi untuk menyesuaikan pembacaan agar cocok dengan patokan sensor referensi utama.
   if (isDHT22Ready) {
-    airTemp = dht.readTemperature();
-    airHum = dht.readHumidity();
+    airTemp = dht.readTemperature() + offsetDHTTemp;
+    airHum = dht.readHumidity() + offsetDHTHum;
+    airTemp = clampSensorFloat(airTemp, -100.0, 100.0);
+    airHum = clampSensorFloat(airHum, SENSOR_MIN, 100.0);
   }
 
+  // Capacitive Soil Moisture: map analog raw ke 0-100 lalu kurangi offset sisa saat sensor di udara.
   int rawAnalog = analogRead(SOIL_PIN);
   analogSoilMoist = map(rawAnalog, SOIL_DRY, SOIL_WET, 0, 100);
-  if(analogSoilMoist < 0) analogSoilMoist = 0;
-  if(analogSoilMoist > 100) analogSoilMoist = 100;
+  analogSoilMoist = analogSoilMoist - offsetAnalogMoist;
+  analogSoilMoist = clampSensorFloat(analogSoilMoist, SENSOR_MIN, SENSOR_MAX);
 
-  float finalSoilMoisture = (rs485SoilMoist > 0) ? rs485SoilMoist : analogSoilMoist;
+  // RS485 7-in-1: zeroing/tare agar saat sensor belum ditancapkan ke tanah nilainya tetap 0.
+  rs485SoilMoist = clampSensorFloat(rs485SoilMoist - offsetRS485SoilMoist, SENSOR_MIN, SENSOR_MAX);
+  currentEC = (uint16_t)clampSensorFloat((float)currentEC - offsetRS485SoilEC, SENSOR_MIN, 65535.0);
+  currentN = (uint16_t)clampSensorFloat((float)currentN - offsetRS485SoilN, SENSOR_MIN, 65535.0);
+  currentP = (uint16_t)clampSensorFloat((float)currentP - offsetRS485SoilP, SENSOR_MIN, 65535.0);
+  currentK = (uint16_t)clampSensorFloat((float)currentK - offsetRS485SoilK, SENSOR_MIN, 65535.0);
+
+  // pH tanah: bila kelembaban tanah 0 berarti sensor di udara, paksa pH = 0; jika ditancap, kurangi offset pH.
+  float calibratedPH = currentPH;
+  if (rs485SoilMoist <= 0.0 || analogSoilMoist <= 0.0) {
+    calibratedPH = 0.0;
+  } else {
+    calibratedPH = currentPH - offsetPH;
+    if (calibratedPH < 0.0) calibratedPH = 0.0;
+  }
+  currentPH = calibratedPH;
+
+  float finalSoilMoisture = (rs485SoilMoist > 0.0) ? rs485SoilMoist : analogSoilMoist;
+  finalSoilMoisture = clampSensorFloat(finalSoilMoisture, SENSOR_MIN, SENSOR_MAX);
 
   StaticJsonDocument<256> doc; 
   doc["deviceId"] = "node-1b";
