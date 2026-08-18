@@ -7,13 +7,15 @@
 const char* ssid = "AGRI-MOTION";         
 const char* password = "agri1234"; 
 
-const char* mqtt_server = "broker.hivemq.com"; 
+const char* mqtt_server = "103.174.114.65"; 
 const int mqtt_port = 1883;
 const char* mqtt_user = ""; 
 const char* mqtt_password = "";
 
-const char* topic_cmd = "agrimotion/demplot/cmd";       
-const char* topic_status = "agrimotion/demplot/status"; 
+const char* mqtt_client_id = "agrimotion-pumps";
+const char* mqtt_topic_sub = "agrimotion/device/pumps/cmd";    // Topik Subscribe Perintah
+const char* mqtt_topic_pub = "agrimotion/device/pumps/";       // Base Topik Publish
+const char* topic_status   = "agrimotion/device/pumps/status"; // Topik Publish Status
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -45,25 +47,25 @@ const int PIN_VALVE_PESTI_D2 = 5;  // PERHATIAN: Pin strapping, pastikan tidak m
 const int PIN_VALVE_PUPUK_D3 = 17; 
 const int PIN_VALVE_PESTI_D3 = 16; 
 
-// Variabel untuk melacak berapa banyak demplot yang sedang aktif (agar Master Air tidak mati duluan)
+// Variabel untuk melacak berapa banyak demplot yang sedang aktif
 int activeZones = 0;
 
+// ARRAY UNTUK SAFETY BOOT
+const int allPins[16] = {
+  PIN_TRIFOO_AIR, PIN_TRIFOO_D1, PIN_TRIFOO_D2, PIN_TRIFOO_D3,
+  PIN_PERI_PUPUK_D1, PIN_PERI_PESTI_D1, PIN_PERI_PUPUK_D2, PIN_PERI_PESTI_D2,
+  PIN_PERI_PUPUK_D3, PIN_PERI_PESTI_D3, PIN_VALVE_PUPUK_D1, PIN_VALVE_PESTI_D1,
+  PIN_VALVE_PUPUK_D2, PIN_VALVE_PESTI_D2, PIN_VALVE_PUPUK_D3, PIN_VALVE_PESTI_D3
+};
+
 void setup() {
-  Serial.begin(115200);
-
-  // ARRAY UNTUK SAFETY BOOT
-  int allPins[] = {
-    PIN_TRIFOO_AIR, PIN_TRIFOO_D1, PIN_TRIFOO_D2, PIN_TRIFOO_D3,
-    PIN_PERI_PUPUK_D1, PIN_PERI_PESTI_D1, PIN_PERI_PUPUK_D2, PIN_PERI_PESTI_D2,
-    PIN_PERI_PUPUK_D3, PIN_PERI_PESTI_D3, PIN_VALVE_PUPUK_D1, PIN_VALVE_PESTI_D1,
-    PIN_VALVE_PUPUK_D2, PIN_VALVE_PESTI_D2, PIN_VALVE_PUPUK_D3, PIN_VALVE_PESTI_D3
-  };
-
-  // Set HIGH (Mati) sebelum pinMode agar relay tidak cetek saat boot
+  // SAFETY BOOT: Kunci semua pin ke HIGH sebelum memulai komunikasi serial/WiFi
   for (int i = 0; i < 16; i++) {
     digitalWrite(allPins[i], HIGH);
     pinMode(allPins[i], OUTPUT);
   }
+
+  Serial.begin(115200);
 
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
@@ -83,16 +85,18 @@ void setup_wifi() {
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Menghubungkan ke MQTT...");
-    String clientId = "AgriMotion-ESP32-" + String(random(0xffff), HEX);
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
-      Serial.println("Terhubung!");
-      client.subscribe(topic_cmd);
-      client.publish(topic_status, "SISTEM SIAP: Seluruh 3 Demplot Terkoneksi");
+    Serial.print("Menghubungkan ke MQTT Server (");
+    Serial.print(mqtt_server);
+    Serial.print(")...");
+    
+    if (client.connect(mqtt_client_id, mqtt_user, mqtt_password)) {
+      Serial.println(" Terhubung!");
+      client.subscribe(mqtt_topic_sub);
+      client.publish(topic_status, "SISTEM SIAP: ESP32 Pumps Controller Terhubung");
     } else {
-      Serial.print("Gagal, rc=");
+      Serial.print(" Gagal, rc=");
       Serial.print(client.state());
-      Serial.println(" Coba 5 detik lagi...");
+      Serial.println(" Coba lagi dalam 5 detik...");
       delay(5000);
     }
   }
@@ -110,8 +114,8 @@ void jalankanSistem(String namaSistem, int pinValve, int pinTrifooD, int pinPeri
   delay(500);
   
   // 2. Nyalakan Pompa Pendorong & Master
-  activeZones++; // Tambah zona aktif
-  digitalWrite(PIN_TRIFOO_AIR, LOW); // Master selalu ON jika ada zona aktif
+  activeZones++; 
+  digitalWrite(PIN_TRIFOO_AIR, LOW); 
   digitalWrite(pinTrifooD, LOW);
   delay(500);
   
@@ -125,9 +129,9 @@ void jalankanSistem(String namaSistem, int pinValve, int pinTrifooD, int pinPeri
 void matikanSistem(String namaSistem, int pinValve, int pinTrifooD, int pinPeri) {
   Serial.println("\n>> MEMATIKAN & FLUSHING: " + namaSistem);
   
-  // 1. Hentikan Injeksi Peristaltik (Bilas Pipa dengan air murni)
+  // 1. Hentikan Injeksi Peristaltik (Flushing pipa)
   digitalWrite(pinPeri, HIGH);
-  delay(3000); // Flushing singkat 3 detik
+  delay(3000); 
   
   // 2. Matikan Pompa Pendorong Demplot
   digitalWrite(pinTrifooD, HIGH);
@@ -135,8 +139,8 @@ void matikanSistem(String namaSistem, int pinValve, int pinTrifooD, int pinPeri)
   // Evaluasi Master Pompa Air
   activeZones--;
   if (activeZones <= 0) {
-    digitalWrite(PIN_TRIFOO_AIR, HIGH); // Matikan master HANYA jika tidak ada demplot lain yang jalan
-    activeZones = 0; // Reset ke 0 untuk mencegah error minus
+    digitalWrite(PIN_TRIFOO_AIR, HIGH); 
+    activeZones = 0; 
   }
   delay(500);
   
@@ -149,12 +153,6 @@ void matikanSistem(String namaSistem, int pinValve, int pinTrifooD, int pinPeri)
 
 void matikanSemuaTotal() {
   Serial.println("\n>> EMERGENCY ALL OFF!");
-  int allPins[] = {
-    PIN_TRIFOO_AIR, PIN_TRIFOO_D1, PIN_TRIFOO_D2, PIN_TRIFOO_D3,
-    PIN_PERI_PUPUK_D1, PIN_PERI_PESTI_D1, PIN_PERI_PUPUK_D2, PIN_PERI_PESTI_D2,
-    PIN_PERI_PUPUK_D3, PIN_PERI_PESTI_D3, PIN_VALVE_PUPUK_D1, PIN_VALVE_PESTI_D1,
-    PIN_VALVE_PUPUK_D2, PIN_VALVE_PESTI_D2, PIN_VALVE_PUPUK_D3, PIN_VALVE_PESTI_D3
-  };
   for (int i = 0; i < 16; i++) {
     digitalWrite(allPins[i], HIGH);
   }
@@ -169,7 +167,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String cmd = "";
   for (int i = 0; i < length; i++) { cmd += (char)payload[i]; }
   cmd.trim(); cmd.toUpperCase();
-  Serial.println("[MQTT] Perintah: " + cmd);
+  Serial.println("[MQTT] Perintah Masuk: " + cmd);
 
   // -- DEMPLOT 1 --
   if      (cmd == "D1_PUPUK_ON")   jalankanSistem("Pupuk Demplot 1", PIN_VALVE_PUPUK_D1, PIN_TRIFOO_D1, PIN_PERI_PUPUK_D1);
