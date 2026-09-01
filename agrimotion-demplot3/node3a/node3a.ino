@@ -80,12 +80,14 @@ void publishData() {
     airHum = sht31.readHumidity();
   }
 
+  /*
   int rawAnalog = analogRead(SOIL_PIN);
   analogSoilMoist = map(rawAnalog, SOIL_DRY, SOIL_WET, 0, 100);
   if(analogSoilMoist < 0) analogSoilMoist = 0;
   if(analogSoilMoist > 100) analogSoilMoist = 100;
+  */
 
-  float finalSoilMoisture = (rs485SoilMoist > 0) ? rs485SoilMoist : analogSoilMoist;
+  float finalSoilMoisture = rs485SoilMoist
 
   StaticJsonDocument<256> doc; 
   doc["deviceId"] = "node-3a";

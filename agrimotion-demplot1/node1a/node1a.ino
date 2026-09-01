@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <BH1750.h>
-#include <Adafruit_SHT31.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
@@ -27,9 +28,9 @@ const unsigned long MODBUS_WINDOW = 400;         // Waktu tunggu respon sensor R
 #define I2C_SDA_1 21  // Baris KUNING P21
 #define I2C_SCL_1 22  // Baris KUNING R22
 
-// 3. I2C Bus 2 (SHT3x)
-#define I2C_SDA_2 25  // Baris KUNING P25
-#define I2C_SCL_2 26  // Baris KUNING P26
+// 3. DHT22
+#define DHT_PIN 13  // Baris KUNING P13
+#define DHT_TYPE DHT22
 
 // 4. Capacitive Soil Moisture
 #define SOIL_PIN 34   
@@ -42,11 +43,10 @@ const int SOIL_WET = 1200;  // Nilai analog saat dicelupkan ke air
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 BH1750 lightMeter;
-TwoWire I2C_SHT = TwoWire(1);
-Adafruit_SHT31 sht31 = Adafruit_SHT31(&I2C_SHT);
+DHT dht(DHT_PIN, DHT_TYPE);
 
 bool isBH1750Ready = false;
-bool isSHT31Ready = false;
+bool isDHT22Ready = false;
 
 // Frame Request NPK 7-in-1 Modbus
 byte npkRequestFrame[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08};
@@ -75,17 +75,19 @@ void publishData() {
     currentLux = lightMeter.readLightLevel();
   }
 
-  if (isSHT31Ready) {
-    airTemp = sht31.readTemperature();
-    airHum = sht31.readHumidity();
+  if (isDHT22Ready) {
+    airTemp = dht.readTemperature();
+    airHum = dht.readHumidity();
   }
 
+  /*
   int rawAnalog = analogRead(SOIL_PIN);
   analogSoilMoist = map(rawAnalog, SOIL_DRY, SOIL_WET, 0, 100);
   if(analogSoilMoist < 0) analogSoilMoist = 0;
   if(analogSoilMoist > 100) analogSoilMoist = 100;
+  */
 
-  float finalSoilMoisture = (rs485SoilMoist > 0) ? rs485SoilMoist : analogSoilMoist;
+  float finalSoilMoisture = rs485SoilMoist
 
   StaticJsonDocument<256> doc; 
   doc["deviceId"] = "node-1a";
@@ -181,14 +183,10 @@ void setup() {
     Serial.println("[BH1750] Warning: Sensor Cahaya tidak terdeteksi!");
   }
 
-  // Inisialisasi I2C 2 (SHT3x)
-  I2C_SHT.begin(I2C_SDA_2, I2C_SCL_2);
-  if (sht31.begin(0x44)) {
-    Serial.println("[SHT31] Sensor Suhu Udara OK!");
-    isSHT31Ready = true;
-  } else {
-    Serial.println("[SHT31] Warning: Sensor Suhu Udara tidak terdeteksi!");
-  }
+  // Inisialisasi DHT22
+  dht.begin();
+  isDHT22Ready = true;
+  Serial.println("[DHT22] Sensor Suhu Udara OK!");
 
   // Inisialisasi Wi-Fi
   Serial.print("[Wi-Fi] Connecting to ");
