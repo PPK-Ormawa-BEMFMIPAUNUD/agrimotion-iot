@@ -11,7 +11,7 @@ const char* ssid = "AGRI-MOTION";
 const char* password = "agri1234";
 
 const char* mqtt_server = "103.174.114.65"; 
-const int mqtt_port = 1883;
+const int mqtt_port = 1883;  
 const char* mqtt_client_id = "agrimotion-node-1a";
 const char* mqtt_topic_pub = "agrimotion/device/node-1a/telemetry";
 
@@ -29,7 +29,7 @@ const unsigned long MODBUS_WINDOW = 400;         // Waktu tunggu respon sensor R
 #define I2C_SCL_1 22  // Baris KUNING R22
 
 // 3. DHT22
-#define DHT_PIN 13  // Baris KUNING P13
+#define DHT_PIN 14
 #define DHT_TYPE DHT22
 
 // 4. Capacitive Soil Moisture
@@ -76,18 +76,17 @@ void publishData() {
   }
 
   if (isDHT22Ready) {
-    airTemp = dht.readTemperature();
-    airHum = dht.readHumidity();
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t) && !isnan(h)) {
+      airTemp = t;
+      airHum = h;
+    } else {
+      Serial.println("[DHT22] ⚠️ Gagal membaca data (NaN). Cek jalur daya 3.3V/5V!");
+    }
   }
 
-  /*
-  int rawAnalog = analogRead(SOIL_PIN);
-  analogSoilMoist = map(rawAnalog, SOIL_DRY, SOIL_WET, 0, 100);
-  if(analogSoilMoist < 0) analogSoilMoist = 0;
-  if(analogSoilMoist > 100) analogSoilMoist = 100;
-  */
-
-  float finalSoilMoisture = rs485SoilMoist
+  float finalSoilMoisture = rs485SoilMoist;
 
   StaticJsonDocument<256> doc; 
   doc["deviceId"] = "node-1a";
@@ -184,9 +183,10 @@ void setup() {
   }
 
   // Inisialisasi DHT22
+  pinMode(DHT_PIN, INPUT_PULLUP);
   dht.begin();
   isDHT22Ready = true;
-  Serial.println("[DHT22] Sensor Suhu Udara OK!");
+  Serial.println("[DHT22] Sensor Suhu & Kelembaban Udara Siap.");
 
   // Inisialisasi Wi-Fi
   Serial.print("[Wi-Fi] Connecting to ");

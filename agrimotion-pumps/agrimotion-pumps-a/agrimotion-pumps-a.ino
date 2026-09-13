@@ -31,11 +31,30 @@ const int PIN_FLOAT_2 = 19;
 const int allPins[4] = {PIN_TRIFOO_AIR, PIN_TRIFOO_D1, PIN_TRIFOO_D2, PIN_TRIFOO_D3};
 int activeZones = 0;
 
+// Variabel Pengaman Watchdog (3 Menit)
+const unsigned long MAX_PUMP_TIMEOUT_MS = 180000;
+unsigned long pumpStartTime = 0;
+bool isAnyPumpRunning = false;
+
 // Variabel Pengisian Jerigen (ESP-NOW)
 bool checkRefill = false;
 bool isRefilling = false;
 unsigned long lastPingTime = 0;
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+bool isAnyRelayActive() {
+  for (int i = 0; i < 4; i++) {
+    if (digitalRead(allPins[i]) == LOW) return true;
+  }
+  return false;
+}
+
+void turnOffAll() {
+  for (int i = 0; i < 4; i++) digitalWrite(allPins[i], HIGH);
+  activeZones = 0; 
+  checkRefill = true;
+  isAnyPumpRunning = false;
+}
 
 void setup() {
   for (int i = 0; i < 4; i++) {
@@ -121,8 +140,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   
   // -- EMERGENCY --
   else if (cmd == "ALL_OFF") {
-    for (int i = 0; i < 4; i++) digitalWrite(allPins[i], HIGH);
-    activeZones = 0; checkRefill = true;
+    turnOffAll();
+  }
+
+  // Update Status Software Watchdog
+  if (cmd.endsWith("_ON")) {
+    pumpStartTime = millis();
+    isAnyPumpRunning = true;
+  } else if (cmd.endsWith("_OFF")) {
+    if (!isAnyRelayActive()) {
+      isAnyPumpRunning = false;
+    }
   }
 }
 
@@ -137,6 +165,15 @@ void loop() {
         }
       }
     } else { mqttClient.loop(); }
+  }
+
+  // --- EMERGENCY HARD-TIMEOUT (SOFTWARE WATCHDOG) ---
+  if (isAnyPumpRunning && (millis() - pumpStartTime >= MAX_PUMP_TIMEOUT_MS)) {
+    Serial.println("\n[SAFETY EWS] ⚠️ HARD TIMEOUT (3 Menit) Tercapai! Mematikan seluruh pompa/valve otomatis...");
+    turnOffAll();
+    if (mqttClient.connected()) {
+      mqttClient.publish(topic_status, "ALERT: [SAFETY EWS] HARD TIMEOUT (3 Menit) Tercapai! Seluruh pompa dimatikan otomatis.");
+    }
   }
 
   bool isFull = (digitalRead(PIN_FLOAT_1) == LOW) && (digitalRead(PIN_FLOAT_2) == LOW);

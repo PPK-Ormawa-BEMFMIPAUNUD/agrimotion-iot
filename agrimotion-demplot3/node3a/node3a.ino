@@ -87,7 +87,7 @@ void publishData() {
   if(analogSoilMoist > 100) analogSoilMoist = 100;
   */
 
-  float finalSoilMoisture = rs485SoilMoist
+  float finalSoilMoisture = rs485SoilMoist;
 
   StaticJsonDocument<256> doc; 
   doc["deviceId"] = "node-3a";
