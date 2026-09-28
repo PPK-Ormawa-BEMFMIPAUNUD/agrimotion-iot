@@ -4,6 +4,8 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 
 // --- Configuration ---
 const char* ssid = "AGRI-MOTION";
@@ -13,6 +15,10 @@ const char* mqtt_server = "103.174.114.65";
 const int mqtt_port = 1883;
 const char* mqtt_client_id = "agrimotion-node-3a";
 const char* mqtt_topic_pub = "agrimotion/device/node-3a/telemetry";
+const char* mqtt_topic_refill_sub = "agrimotion/device/pumps/refill/cmd"; // Topic Refill dari Pumps-A
+
+// Alamat broadcast ESP-NOW untuk relay ke Pumps-C
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 const unsigned long PUBLISH_INTERVAL = 10000;    // 10 detik
 const unsigned long MODBUS_WINDOW = 400;         // Waktu tunggu respon sensor RS485
@@ -159,6 +165,28 @@ void processModbusResponse() {
   }
 }
 
+// Callback MQTT untuk Jembatan/Relay ke ESP Pumps-C
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String cmd = "";
+  for (unsigned int i = 0; i < length; i++) {
+    cmd += (char)payload[i];
+  }
+  cmd.trim(); cmd.toUpperCase();
+
+  if (String(topic) == mqtt_topic_refill_sub) {
+    Serial.print("[Node-3A Relay] Perintah Refill diterima via MQTT: ");
+    Serial.println(cmd);
+
+    // Meneruskan perintah ke ESP Pumps-C via ESP-NOW
+    esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)cmd.c_str(), cmd.length());
+    if (result == ESP_OK) {
+      Serial.println("[Node-3A Relay] -> Berhasil diteruskan ke Pumps-C via ESP-NOW");
+    } else {
+      Serial.printf("[Node-3A Relay] ⚠️ Gagal meneruskan ESP-NOW, kode error: %d\n", result);
+    }
+  }
+}
+
 void setup() {
   pinMode(RE_DE_PIN, OUTPUT);
   digitalWrite(RE_DE_PIN, LOW);
@@ -198,8 +226,25 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
 
-  // Set MQTT Server
+  // Set MQTT Server & Callback
   mqttClient.setServer(mqtt_server, mqtt_port);
+  mqttClient.setCallback(mqttCallback);
+
+  // Inisialisasi ESP-NOW Relay ke ESP Pumps-C
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[Node-3A] Error Inisialisasi ESP-NOW Relay!");
+  } else {
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+    peerInfo.channel = 0; // 0 = Mengikuti channel WiFi STA router
+    peerInfo.encrypt = false;
+    if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+      Serial.println("[Node-3A] ESP-NOW Relay Siap (Broadcast Peer terdaftar).");
+    } else {
+      Serial.println("[Node-3A] Gagal mendaftarkan peer ESP-NOW!");
+    }
+  }
+
   Serial.println("[System] Setup Selesai! Memulai loop operasional...\n");
   lastPublishTime = millis();
 }
@@ -214,6 +259,9 @@ void loop() {
         Serial.print("[MQTT] Connecting to VPS...");
         if (mqttClient.connect(mqtt_client_id)) {
           Serial.println(" CONNECTED!");
+          mqttClient.subscribe(mqtt_topic_refill_sub);
+          Serial.printf("[Node-3A] Subscribed ke topic relay refill: %s\n", mqtt_topic_refill_sub);
+          Serial.printf("[Node-3A] WiFi Channel Terkunci: %d\n", WiFi.channel());
         } else {
           Serial.print(" Failed, rc=");
           Serial.println(mqttClient.state());

@@ -4,38 +4,40 @@
 
 // ==========================================
 // PENTING: SINKRONISASI KANAL WIFI!
-// Ubah angka ini sesuai dengan "Channel WiFi" 
-// yang tercetak di Serial Monitor ESP A.
+// Nilai WIFI_CHANNEL WAJIB sama persis dengan
+// channel WiFi router/modem "AGRI-MOTION" dan
+// channel yang dilaporkan oleh ESP Node-3A / ESP-A.
 // ==========================================
 constexpr uint8_t WIFI_CHANNEL = 1; 
 
 const int PIN_BILGE_PUMP = 32; // IN1 Relay 5
 
-// Variabel Pengaman (Fail-Safe)
+// Variabel Pengaman (Fail-Safe & Watchdog)
 bool isPumpOn = false;
 unsigned long lastHeartbeatTime = 0;
 unsigned long pumpStartTime = 0;
-const unsigned long TIMEOUT_HEARTBEAT = 5000;   // 5 Detik hilang sinyal -> Mati
-const unsigned long MAX_RUN_TIME = 480000;      // 8 Menit batas maksimal hidup terus-terusan
+const unsigned long TIMEOUT_HEARTBEAT = 30000;   // 30 Detik hilang sinyal -> Auto-Cutoff mandiri
+const unsigned long MAX_RUN_TIME = 180000;      // 3 Menit (180 detik) batas maksimal pengisian (Calculated Timeout 10L / 5LPM)
 
-// Callback saat data ESP-NOW masuk
+// Callback saat data ESP-NOW masuk dari ESP Node-3A (Relay)
 void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   String cmd = "";
   for (int i = 0; i < len; i++) { cmd += (char)incomingData[i]; }
+  cmd.trim(); cmd.toUpperCase();
   
   if (cmd == "CMD_PUMP_ON") {
     lastHeartbeatTime = millis();
     if (!isPumpOn) {
-      digitalWrite(PIN_BILGE_PUMP, LOW); // Pompa ON
+      digitalWrite(PIN_BILGE_PUMP, LOW); // Pompa ON (Active-Low)
       isPumpOn = true;
       pumpStartTime = millis();
-      Serial.println("[ESP C] Sinyal ON diterima. Pompa Bilge MENYALA.");
+      Serial.println("[ESP C] Sinyal ON diterima dari Relay Node-3A. Pompa Bilge MENYALA.");
     }
   } 
   else if (cmd == "CMD_PUMP_OFF") {
     digitalWrite(PIN_BILGE_PUMP, HIGH); // Pompa OFF
     isPumpOn = false;
-    Serial.println("[ESP C] Sinyal OFF diterima. Pompa Bilge MATI.");
+    Serial.println("[ESP C] Sinyal OFF diterima dari Relay Node-3A. Pompa Bilge MATI.");
   }
 }
 
@@ -69,18 +71,18 @@ void setup() {
 
 void loop() {
   if (isPumpOn) {
-    // FAIL-SAFE 1: Sinyal Terputus / Out of Range
+    // FAIL-SAFE 1: Sinyal Terputus / Out of Range (> 30 Detik Auto-Cutoff)
     if (millis() - lastHeartbeatTime > TIMEOUT_HEARTBEAT) {
       digitalWrite(PIN_BILGE_PUMP, HIGH);
       isPumpOn = false;
-      Serial.println("[ALARM] Sinyal Terputus > 5 Detik! Pompa dimatikan paksa.");
+      Serial.println("[FAIL-SAFE] ⚠️ Heartbeat ESP-NOW Terputus > 30 Detik! Auto-Cutoff Pompa Bilge diaktifkan.");
     }
     
-    // FAIL-SAFE 2: Pompa menyala terlalu lama (Sensor rusak/nyangkut)
+    // FAIL-SAFE 2: Pompa menyala melebihi batas waktu (3 Menit Max-Runtime Limiter)
     if (millis() - pumpStartTime > MAX_RUN_TIME) {
       digitalWrite(PIN_BILGE_PUMP, HIGH);
       isPumpOn = false;
-      Serial.println("[ALARM] Batas Waktu 8 Menit Tercapai! Pompa dimatikan paksa.");
+      Serial.println("[SAFETY EWS] ⚠️ Batas Max-Runtime 3 Menit Tercapai! Pompa Bilge dimatikan paksa (Anti-Meluap).");
     }
   }
 }
