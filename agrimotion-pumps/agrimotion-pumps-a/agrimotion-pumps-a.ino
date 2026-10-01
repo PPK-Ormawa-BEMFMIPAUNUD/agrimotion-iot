@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <esp_now.h>
+#include <time.h>
 
 // ==========================================
 // 1. KONFIGURASI WIFI & MQTT SERVER
@@ -17,6 +18,18 @@ const char* mqtt_topic_refill_cmd = "agrimotion/device/pumps/refill/cmd"; // Top
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 unsigned long lastMqttRetry = 0;
+
+// ==========================================
+// KONFIGURASI NTP & JADWAL RUTIN PAGI (WITA / GMT+8)
+// ==========================================
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 28800; // GMT+8 (8 * 3600 detik) untuk waktu WITA
+const int daylightOffset_sec = 0;
+
+int morningCheckHour = 6;          // Default: Jam 06 pagi WITA (dapat disesuaikan)
+int morningCheckMinute = 0;        // Default: Menit 00
+int lastMorningCheckDay = -1;      // Pelacak hari (mday) untuk flag harian
+bool hasExecutedMorningCheck = false;
 
 // ==========================================
 // 2. PEMETAAN PIN & VARIABEL
@@ -114,6 +127,10 @@ void setup() {
   Serial.print("\n[ESP A] Terhubung ke WiFi. Channel WiFi: ");
   Serial.println(WiFi.channel());
 
+  // Konfigurasi Sinkronisasi Waktu NTP (WITA GMT+8)
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("[ESP A] Sinkronisasi waktu NTP dimulai (Zona Waktu WITA / GMT+8).");
+
   if (esp_now_init() != ESP_OK) {
     Serial.println("Error inisialisasi ESP-NOW");
   } else {
@@ -143,6 +160,84 @@ void sendRefillCommand(String cmd) {
   }
   // 2. Redundansi: Kirim langsung via ESP-NOW jika dalam jangkauan
   sendEspNow(cmd);
+}
+
+// ==========================================
+// RUTIN OTOMATIS: PENGECEKAN & PENGISIAN AIR PAGI (WITA)
+// ==========================================
+void checkMorningRoutine(bool forceCheck = false) {
+  static unsigned long lastCheckTime = 0;
+  // Non-blocking timer: cek setiap 10 detik jika bukan perintah manual
+  if (!forceCheck && (millis() - lastCheckTime < 10000)) return;
+  lastCheckTime = millis();
+
+  struct tm timeinfo;
+  bool isTimeSynced = getLocalTime(&timeinfo, 0);
+
+  if (!isTimeSynced && !forceCheck) {
+    return; // Waktu NTP belum siap
+  }
+
+  // Reset flag harian ketika hari berganti (sebelum waktu pagi tercapai)
+  if (isTimeSynced && lastMorningCheckDay != -1 && timeinfo.tm_mday != lastMorningCheckDay && timeinfo.tm_hour < morningCheckHour) {
+    hasExecutedMorningCheck = false;
+  }
+
+  // Syarat pemicu: waktu pagi tercapai dan belum dijalankan pada hari ini (atau perintah uji coba manual)
+  bool isScheduledTime = isTimeSynced && (timeinfo.tm_hour == morningCheckHour && timeinfo.tm_min >= morningCheckMinute && timeinfo.tm_mday != lastMorningCheckDay);
+
+  if (isScheduledTime || forceCheck) {
+    if (isTimeSynced && !forceCheck) {
+      lastMorningCheckDay = timeinfo.tm_mday;
+      hasExecutedMorningCheck = true;
+    }
+
+    if (isTimeSynced) {
+      char timeBuffer[32];
+      strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+      Serial.printf("\n[MORNING_CHECK] ⏰ Rutin pengecekan level air pagi dimulai (%s WITA)\n", timeBuffer);
+    } else {
+      Serial.println("\n[MORNING_CHECK] ⏰ Rutin pengecekan level air manual dimulai (NTP Offline)");
+    }
+
+    // INTERLOCK 1: Cek jika sistem sedang dalam status error pengisian
+    if (isRefillTimeoutError) {
+      Serial.println("[MORNING_CHECK] ⚠️ Rutin pengisian pagi DITUNDA: Sistem dalam status ERROR_TIMEOUT_REFILL.");
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_status, "ALERT: [MORNING_CHECK] Ditunda! Tandon dalam status ralat/error ERROR_TIMEOUT_REFILL.");
+      }
+      return;
+    }
+
+    // INTERLOCK 2: Cek jika terdapat aktivitas penyiraman/fertigasi aktif
+    if (isAnyPumpRunning || activeZones > 0 || isAnyRelayActive()) {
+      Serial.println("[MORNING_CHECK] ⚠️ Rutin pengisian pagi DITUNDA: Siklus penyiraman/dosing sedang berjalan.");
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_status, "STATUS: [MORNING_CHECK] Ditunda karena pompa penyiraman sedang aktif.");
+      }
+      return;
+    }
+
+    // INTERLOCK 3: Cek jika proses pengisian sudah aktif
+    if (isRefilling) {
+      Serial.println("[MORNING_CHECK] Pengisian air sudah sedang berjalan.");
+      return;
+    }
+
+    // Logika Pengecekan Level Air di Jerigen
+    if (isWaterFullDebounced) {
+      Serial.println("[MORNING_CHECK] Air sudah penuh. Tidak perlu pengisian.");
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_status, "STATUS: [MORNING_CHECK] Air sudah penuh. Tidak perlu pengisian.");
+      }
+    } else {
+      Serial.println("[MORNING_CHECK] Air belum penuh/kurang. Memicu auto-refill pagi...");
+      if (mqttClient.connected()) {
+        mqttClient.publish(topic_status, "STATUS: [MORNING_CHECK] Air kurang. Memulai auto-refill pagi...");
+      }
+      checkRefill = true; // Memicu rutin auto-refill aman yang sudah ada
+    }
+  }
 }
 
 void startTrifoo(int pinDemplot, String namaDemplot) {
@@ -214,6 +309,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       mqttClient.publish(topic_status, "STATUS: Refill error telah di-reset. Siap auto-refill.");
     }
   }
+  else if (cmd == "MORNING_CHECK_NOW" || cmd == "CHECK_WATER") {
+    Serial.println("[ESP A] Perintah uji manual pengecekan pagi diterima via MQTT.");
+    checkMorningRoutine(true);
+  }
 
   // Update Status Software Watchdog untuk OFF
   if (cmd.endsWith("_OFF")) {
@@ -244,6 +343,9 @@ void loop() {
       mqttClient.publish(topic_status, "ALERT: [SAFETY EWS] HARD TIMEOUT (3 Menit) Tercapai! Seluruh pompa dimatikan otomatis.");
     }
   }
+
+  // --- RUTIN OTOMATIS: PENGECEKAN & PENGISIAN AIR WAKTU PAGI (WITA) ---
+  checkMorningRoutine();
 
   // --- KONTROL OTOMASI PENGISIAN AIR & SAFETY PROTECTION (JERIGEN 10L) ---
   // 1. Update bacaan sensor air dengan debouncing (1500 ms filter riak air)
